@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net"
+	"reflect"
 	"syscall"
 	"testing"
 )
@@ -467,5 +468,115 @@ func TestRxFlowInsertReachesDriver(t *testing.T) {
 				t.Fatalf("rxnfc insert failed with an unexpected error (possible malformed ioctl): %v", err)
 			}
 		})
+	}
+}
+
+// TestParseNetDevRxFlow decodes rules encoded the same way NetDevRxFlowInsert
+// encodes them. Every field has a distinct value so a field decoded from the
+// wrong offset fails the comparison, and unset fields must decode as nil.
+func TestParseNetDevRxFlow(t *testing.T) {
+	srcMAC, _ := net.ParseMAC("02:00:00:00:00:02")
+	dstMAC, _ := net.ParseMAC("02:00:00:00:00:01")
+	allOnesMAC := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	ip4Fields := TCPIP4Fields{
+		SrcIP:       net.IP{192, 0, 2, 0},
+		SrcIPMask:   net.IP(net.CIDRMask(24, 32)),
+		DstIP:       net.IP{198, 51, 100, 7},
+		DstIPMask:   net.IP(net.CIDRMask(32, 32)),
+		SrcPort:     12345,
+		SrcPortMask: 0xff00,
+		DstPort:     4420,
+		DstPortMask: 0xffff,
+	}
+	ip6Fields := TCPIP6Fields{
+		SrcIP:       net.ParseIP("2001:db8:1234:5678::"),
+		SrcIPMask:   net.IP(net.CIDRMask(64, 128)),
+		DstIP:       net.ParseIP("2001:db8::5"),
+		DstIPMask:   net.IP(net.CIDRMask(128, 128)),
+		SrcPort:     23456,
+		SrcPortMask: 0xfff0,
+		DstPort:     443,
+		DstPortMask: 0xffff,
+	}
+	matches := []NetDevRxFlowMatch{
+		EtherFlow{
+			SrcMAC: srcMAC, SrcMACMask: allOnesMAC,
+			DstMAC: dstMAC, DstMACMask: allOnesMAC,
+			EthProto: 0x86dd, ProtoMask: 0xffff,
+		},
+		TCP4Flow{ip4Fields},
+		UDP4Flow{ip4Fields},
+		TCP6Flow{ip6Fields},
+		UDP6Flow{ip6Fields},
+		TCP4Flow{TCPIP4Fields{
+			DstIP:       net.IP{198, 51, 100, 7},
+			DstIPMask:   net.IP(net.CIDRMask(32, 32)),
+			DstPort:     80,
+			DstPortMask: 0xffff,
+		}},
+	}
+	for i, match := range matches {
+		want := &NetDevRxFlow{Match: match, Queue: uint32(60 + i), Location: uint32(i)}
+		val, mask := match.serialize()
+		got, err := parseNetDevRxFlow(&ethtoolRxFlowSpec{
+			flowType:   match.flowType(),
+			hU:         val,
+			mU:         mask,
+			ringCookie: uint64(want.Queue),
+			location:   want.Location,
+		})
+		if err != nil {
+			t.Fatalf("%T: %v", match, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("decoded %+v, want %+v", got, want)
+		}
+	}
+}
+
+func TestParseNetDevRxFlowNotImplemented(t *testing.T) {
+	val, mask := TCP4Flow{TCPIP4Fields{DstPort: 80, DstPortMask: 0xffff}}.serialize()
+	valid := ethtoolRxFlowSpec{flowType: TCP_V4_FLOW, hU: val, mU: mask, ringCookie: 3}
+
+	// FLOW_EXT is harmless when no extension field takes part in the match.
+	ext := valid
+	ext.flowType |= ethtoolFlowExt
+	if _, err := parseNetDevRxFlow(&ext); err != nil {
+		t.Errorf("FLOW_EXT without extension masks was rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		modify func(*ethtoolRxFlowSpec)
+	}{
+		{"RSS context", func(fs *ethtoolRxFlowSpec) { fs.flowType |= ethtoolFlowRSS }},
+		{"drop action", func(fs *ethtoolRxFlowSpec) { fs.ringCookie = ^uint64(0) }},
+		{"VF action", func(fs *ethtoolRxFlowSpec) { fs.ringCookie = 1<<32 | 3 }},
+		{"VLAN extension", func(fs *ethtoolRxFlowSpec) {
+			fs.flowType |= ethtoolFlowExt
+			networkOrder.PutUint16(fs.mExt[6:8], 0x0fff)
+		}},
+		{"IPv4 TOS", func(fs *ethtoolRxFlowSpec) { fs.mU[12] = 0xff }},
+		{"IPv4 user flow", func(fs *ethtoolRxFlowSpec) { fs.flowType = 0x0d }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := valid
+			tt.modify(&fs)
+			if _, err := parseNetDevRxFlow(&fs); !errors.Is(err, ErrNotImplemented) {
+				t.Fatalf("error = %v, want ErrNotImplemented", err)
+			}
+		})
+	}
+}
+
+// TestRxFlowGetReachesDriver mirrors TestRxFlowInsertReachesDriver: loopback
+// does not implement rxnfc, so a well-formed request returns EOPNOTSUPP.
+func TestRxFlowGetReachesDriver(t *testing.T) {
+	t.Cleanup(setUpNetlinkTestWithLoopback(t))
+
+	_, err := NetDevRxFlowGet("lo", 0)
+	if !errors.Is(err, syscall.EOPNOTSUPP) && !errors.Is(err, syscall.ENOTSUP) {
+		t.Fatalf("rxnfc get on lo returned %v, want EOPNOTSUPP", err)
 	}
 }
