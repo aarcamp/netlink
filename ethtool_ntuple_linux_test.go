@@ -580,3 +580,32 @@ func TestRxFlowGetReachesDriver(t *testing.T) {
 		t.Fatalf("rxnfc get on lo returned %v, want EOPNOTSUPP", err)
 	}
 }
+
+func TestParseNetDevRxFlowTable(t *testing.T) {
+	tests := []struct {
+		data uint64
+		want NetDevRxFlowTable
+	}{
+		{data: 1024, want: NetDevRxFlowTable{Rules: 3, Size: 1024}},
+		{data: uint64(RX_CLS_LOC_SPECIAL) | 256, want: NetDevRxFlowTable{Rules: 3, Size: 256, SpecialLocations: true}},
+		{data: 0, want: NetDevRxFlowTable{Rules: 3}},
+	}
+	for _, tt := range tests {
+		nfc := ethtoolRxnfc{data: tt.data, ruleCntOrRssCtx: 3}
+		if got := parseNetDevRxFlowTable(&nfc); *got != tt.want {
+			t.Errorf("data %#x: got %+v, want %+v", tt.data, *got, tt.want)
+		}
+	}
+}
+
+// TestRxFlowTableGetReachesDriver mirrors TestRxFlowInsertReachesDriver:
+// loopback does not implement rxnfc, so a well-formed request returns
+// EOPNOTSUPP.
+func TestRxFlowTableGetReachesDriver(t *testing.T) {
+	t.Cleanup(setUpNetlinkTestWithLoopback(t))
+
+	_, err := NetDevRxFlowTableGet("lo")
+	if !errors.Is(err, syscall.EOPNOTSUPP) && !errors.Is(err, syscall.ENOTSUP) {
+		t.Fatalf("rxnfc rule count on lo returned %v, want EOPNOTSUPP", err)
+	}
+}

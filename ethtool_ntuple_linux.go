@@ -31,11 +31,13 @@ const (
 	ETHER_FLOW  = 0x12
 )
 
-// Special location values for rule insertion.
+// Special location values for rule insertion. RX_CLS_LOC_SPECIAL is the flag
+// that marks them, and that a driver reports when it accepts them.
 const (
-	RX_CLS_LOC_ANY   uint32 = 0xffffffff
-	RX_CLS_LOC_FIRST uint32 = 0xfffffffe
-	RX_CLS_LOC_LAST  uint32 = 0xfffffffd
+	RX_CLS_LOC_SPECIAL uint32 = 0x80000000
+	RX_CLS_LOC_ANY     uint32 = 0xffffffff
+	RX_CLS_LOC_FIRST   uint32 = 0xfffffffe
+	RX_CLS_LOC_LAST    uint32 = 0xfffffffd
 )
 
 // ETHTOOL_RX_FLOW_SPEC_RING masks the queue index out of ring_cookie (the low
@@ -508,6 +510,38 @@ func parseNetDevRxFlowLocations(buf []byte, layout ethtoolRxnfcLayout, capacity 
 		locs[i] = native.Uint32(buf[off : off+4])
 	}
 	return locs, nil
+}
+
+// NetDevRxFlowTable describes the RX flow steering rule table of a device.
+type NetDevRxFlowTable struct {
+	// Rules is the number of rules currently installed.
+	Rules uint32
+	// Size is the number of rule locations, or zero if the driver does not
+	// report it.
+	Size uint32
+	// SpecialLocations reports whether the driver accepts RX_CLS_LOC_ANY,
+	// RX_CLS_LOC_FIRST and RX_CLS_LOC_LAST as insert locations. Otherwise
+	// callers must choose a location below Size themselves.
+	SpecialLocations bool
+}
+
+// NetDevRxFlowTableGet returns the RX flow steering rule table of dev.
+func NetDevRxFlowTableGet(dev string) (*NetDevRxFlowTable, error) {
+	nfc := ethtoolRxnfc{cmd: ETHTOOL_GRXCLSRLCNT}
+	if err := ethtoolRxnfcIoctl(dev, &nfc); err != nil {
+		return nil, err
+	}
+	return parseNetDevRxFlowTable(&nfc), nil
+}
+
+func parseNetDevRxFlowTable(nfc *ethtoolRxnfc) *NetDevRxFlowTable {
+	// The low 32 bits of data hold the table size and the special location flag.
+	data := uint32(nfc.data)
+	return &NetDevRxFlowTable{
+		Rules:            nfc.ruleCntOrRssCtx,
+		Size:             data &^ RX_CLS_LOC_SPECIAL,
+		SpecialLocations: data&RX_CLS_LOC_SPECIAL != 0,
+	}
 }
 
 // NetDevRxFlowGet returns the RX flow steering rule at the given location on
