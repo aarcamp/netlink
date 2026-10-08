@@ -609,3 +609,64 @@ func TestRxFlowTableGetReachesDriver(t *testing.T) {
 		t.Fatalf("rxnfc rule count on lo returned %v, want EOPNOTSUPP", err)
 	}
 }
+
+func TestParseNetDevRxFlowAction(t *testing.T) {
+	tests := []struct {
+		name string
+		nfc  ethtoolRxnfc
+		want NetDevRxFlowAction
+	}{
+		{
+			name: "queue",
+			nfc:  ethtoolRxnfc{fs: ethtoolRxFlowSpec{flowType: TCP_V4_FLOW, ringCookie: 62}},
+			want: NetDevRxFlowAction{Queue: 62},
+		},
+		{
+			name: "queue for a rule NetDevRxFlow cannot represent",
+			nfc:  ethtoolRxnfc{fs: ethtoolRxFlowSpec{flowType: 0x0d | ethtoolFlowExt, ringCookie: 7}},
+			want: NetDevRxFlowAction{Queue: 7},
+		},
+		{
+			name: "drop",
+			nfc:  ethtoolRxnfc{fs: ethtoolRxFlowSpec{ringCookie: ethtoolRxClsFlowDisc}},
+			want: NetDevRxFlowAction{Drop: true},
+		},
+		{
+			name: "wake-on-LAN",
+			nfc:  ethtoolRxnfc{fs: ethtoolRxFlowSpec{ringCookie: ethtoolRxClsFlowWake}},
+			want: NetDevRxFlowAction{WakeOnLAN: true},
+		},
+		{
+			name: "virtual function",
+			nfc:  ethtoolRxnfc{fs: ethtoolRxFlowSpec{ringCookie: 3<<32 | 5}},
+			want: NetDevRxFlowAction{VF: 3, Queue: 5},
+		},
+		{
+			name: "RSS context",
+			nfc: ethtoolRxnfc{
+				fs:              ethtoolRxFlowSpec{flowType: UDP_V6_FLOW | ethtoolFlowRSS, ringCookie: 2},
+				ruleCntOrRssCtx: 4,
+			},
+			want: NetDevRxFlowAction{Queue: 2, UsesRSSContext: true, RSSContext: 4},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseNetDevRxFlowAction(&tt.nfc); *got != tt.want {
+				t.Errorf("got %+v, want %+v", *got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRxFlowActionGetReachesDriver mirrors TestRxFlowInsertReachesDriver:
+// loopback does not implement rxnfc, so a well-formed request returns
+// EOPNOTSUPP.
+func TestRxFlowActionGetReachesDriver(t *testing.T) {
+	t.Cleanup(setUpNetlinkTestWithLoopback(t))
+
+	_, err := NetDevRxFlowActionGet("lo", 0)
+	if !errors.Is(err, syscall.EOPNOTSUPP) && !errors.Is(err, syscall.ENOTSUP) {
+		t.Fatalf("rxnfc get on lo returned %v, want EOPNOTSUPP", err)
+	}
+}

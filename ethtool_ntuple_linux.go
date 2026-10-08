@@ -44,6 +44,13 @@ const (
 // 32 bits); bits 32-39 hold an optional VF id which we leave zero.
 const ethtoolRxFlowSpecRing = 0x00000000FFFFFFFF
 
+// Special ring_cookie values (RX_CLS_FLOW_DISC and RX_CLS_FLOW_WAKE in
+// ethtool.h) that discard matching packets or use them for Wake-on-LAN.
+const (
+	ethtoolRxClsFlowDisc = 0xffffffffffffffff
+	ethtoolRxClsFlowWake = 0xfffffffffffffffe
+)
+
 // Flags ORed into ethtoolRxFlowSpec.flowType (FLOW_EXT, FLOW_MAC_EXT and
 // FLOW_RSS in ethtool.h).
 const (
@@ -542,6 +549,57 @@ func parseNetDevRxFlowTable(nfc *ethtoolRxnfc) *NetDevRxFlowTable {
 		Size:             data &^ RX_CLS_LOC_SPECIAL,
 		SpecialLocations: data&RX_CLS_LOC_SPECIAL != 0,
 	}
+}
+
+// NetDevRxFlowAction describes what an RX flow steering rule does with the
+// packets it matches.
+type NetDevRxFlowAction struct {
+	// Drop is set for rules that discard matching packets.
+	Drop bool
+	// WakeOnLAN is set for rules that use matching packets to wake the system.
+	WakeOnLAN bool
+	// VF is zero for rules that deliver to the device itself, or one more than
+	// the index of the virtual function that receives matching packets.
+	VF uint8
+	// Queue is the receive queue for matching packets. If UsesRSSContext is
+	// set, Queue is added to the queue that RSSContext selects instead.
+	Queue uint32
+	// UsesRSSContext is set for rules that spread matching packets over the
+	// queues of RSSContext.
+	UsesRSSContext bool
+	RSSContext     uint32
+}
+
+// NetDevRxFlowActionGet returns the action of the RX flow steering rule at the
+// given location on dev. Unlike NetDevRxFlowGet, it succeeds for every rule,
+// whatever the rule matches on.
+func NetDevRxFlowActionGet(dev string, location uint32) (*NetDevRxFlowAction, error) {
+	nfc := ethtoolRxnfc{
+		cmd: ETHTOOL_GRXCLSRULE,
+		fs:  ethtoolRxFlowSpec{location: location},
+	}
+	if err := ethtoolRxnfcIoctl(dev, &nfc); err != nil {
+		return nil, err
+	}
+	return parseNetDevRxFlowAction(&nfc), nil
+}
+
+func parseNetDevRxFlowAction(nfc *ethtoolRxnfc) *NetDevRxFlowAction {
+	switch nfc.fs.ringCookie {
+	case ethtoolRxClsFlowDisc:
+		return &NetDevRxFlowAction{Drop: true}
+	case ethtoolRxClsFlowWake:
+		return &NetDevRxFlowAction{WakeOnLAN: true}
+	}
+	action := &NetDevRxFlowAction{
+		VF:    uint8(nfc.fs.ringCookie >> 32),
+		Queue: uint32(nfc.fs.ringCookie & ethtoolRxFlowSpecRing),
+	}
+	if nfc.fs.flowType&ethtoolFlowRSS != 0 {
+		action.UsesRSSContext = true
+		action.RSSContext = nfc.ruleCntOrRssCtx
+	}
+	return action
 }
 
 // NetDevRxFlowGet returns the RX flow steering rule at the given location on
